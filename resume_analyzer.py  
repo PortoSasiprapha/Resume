@@ -1,0 +1,226 @@
+
+from __future__ import annotations
+import os
+import tempfile
+from typing import Optional, Dict, Any
+
+import streamlit as st
+from jamaibase import JamAI, types as t
+
+# ==========================================
+# Configuration (Extracted from Screenshot)
+# ==========================================
+DEFAULT_PROJECT_ID = "proj_d3e6a8c8a2fa76a363b886bb"
+DEFAULT_PAT = "jamai_pat_fb6e6d9050cf68f9447549b89d6c8c0614647a804a304cb2"
+DEFAULT_TABLE_ID = "Resume_Check"
+
+# Column IDs
+DEFAULT_IMAGE_COL = "image_resume"  # Image file input
+DEFAULT_DETAIL_COL = "detail"       # LLM string output (Extracted info)
+# LLM string output (Improvements/Strengths)
+DEFAULT_STRENGTH_COL = "strengthen"
+
+st.set_page_config(
+    page_title="JamAI Base Resume Analyzer",
+    page_icon="📄",
+    layout="wide"
+)
+
+# Custom Styling for premium look
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #1E293B;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        font-size: 1.1rem;
+        color: #64748B;
+        margin-bottom: 2rem;
+    }
+    .card {
+        background-color: #F8FAFC;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid #E2E8F0;
+        margin-bottom: 1rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==============================
+# Sidebar Configuration
+# ==============================
+with st.sidebar:
+    st.image("https://cloud.jamaibase.com/assets/logo.png",
+             width=120, onerror="allow")
+    st.subheader("JamAI Base Settings")
+    project_id = st.text_input("Project ID", value=DEFAULT_PROJECT_ID)
+    pat = st.text_input("Personal Access Token (PAT)",
+                        value=DEFAULT_PAT, type="password")
+    table_id = st.text_input("Table ID", value=DEFAULT_TABLE_ID)
+
+    with st.expander("Column Mappings (Case-Sensitive)"):
+        img_col = st.text_input("Input Image Column", value=DEFAULT_IMAGE_COL)
+        detail_col = st.text_input(
+            "Output Detail Column", value=DEFAULT_DETAIL_COL)
+        strength_col = st.text_input(
+            "Output Strength Column", value=DEFAULT_STRENGTH_COL)
+
+# ==============================
+# Helper Functions
+# ==============================
+
+
+def get_client() -> JamAI:
+    """Initialize the JamAI client."""
+    if not project_id or not pat:
+        raise RuntimeError(
+            "Please enter your Project ID and Personal Access Token (PAT) in the sidebar.")
+    return JamAI(project_id=project_id, token=pat)
+
+
+def upload_file_to_jamai(client: JamAI, uploaded_file) -> Optional[str]:
+    """Upload resume image to JamAI and return its URI."""
+    if not uploaded_file:
+        return None
+
+    suffix = os.path.splitext(uploaded_file.name)[1] or ".png"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
+
+    try:
+        response = client.file.upload_file(tmp_path)
+        return getattr(response, "uri", None)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def clean_cell_text(cell_value: Any) -> str:
+    """Helper to safely extract string values from cell outputs."""
+    try:
+        return getattr(cell_value, "text", "") or ""
+    except Exception:
+        return str(cell_value) if cell_value else ""
+
+
+def process_resume(client: JamAI, image_uri: str) -> Dict[str, str]:
+    """
+    Sends the resume URI to JamAI Base action table,
+    processing columns synchronously for this simple run.
+    """
+    request = t.MultiRowAddRequest(
+        table_id=table_id,
+        data=[{img_col: image_uri}],
+        stream=False,
+    )
+    result = client.table.add_table_rows(t.TableType.ACTION, request)
+
+    # Grab row columns
+    row = result.rows[0] if getattr(result, "rows", None) else None
+    columns = getattr(row, "columns", {}) if row else {}
+
+    details_extracted = clean_cell_text(columns.get(detail_col))
+    strengthen_extracted = clean_cell_text(columns.get(strength_col))
+
+    return {
+        "detail": details_extracted,
+        "strengthen": strengthen_extracted
+    }
+
+
+# ==============================
+# Application Main UI Layout
+# ==============================
+st.markdown('<div class="main-header">📄 JamAI Base Resume Checker</div>',
+            unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Upload an image of a resume to extract structural details and generate improvement suggestions instantly.</div>', unsafe_allow_html=True)
+
+try:
+    client = get_client()
+except Exception as err:
+    st.error(f"Configuration Error: {err}")
+    st.stop()
+
+col_left, col_right = st.columns([1, 1.2])
+
+with col_left:
+    st.subheader("📤 Step 1: Upload Resume")
+    uploaded_image = st.file_uploader(
+        "Choose a resume image...",
+        type=["jpg", "jpeg", "png", "webp"],
+        help="Upload the resume in visual formats like JPG or PNG"
+    )
+
+    if uploaded_image:
+        st.image(uploaded_image, caption="Uploaded Resume Preview",
+                 use_container_width=True)
+
+with col_right:
+    st.subheader("🎯 Step 2: Analyze & Extract")
+    run_btn = st.button("Run Resume Check", type="primary",
+                        use_container_width=True)
+
+    # Placeholder spaces for outputs
+    detail_placeholder = st.empty()
+    strength_placeholder = st.empty()
+    download_placeholder = st.empty()
+
+    if run_btn:
+        if not uploaded_image:
+            st.warning("Please upload a resume image before running.")
+            st.stop()
+
+        with st.status("Processing resume with JamAI Base...", expanded=True) as status:
+            status.write("Uploading file to JamAI storage...")
+            img_uri = upload_file_to_jamai(client, uploaded_image)
+
+            if not img_uri:
+                status.update(label="Upload failed!", state="error")
+                st.error("Failed to generate a valid URI for the file.")
+                st.stop()
+
+            status.write("Running Action Table LLMs...")
+            analysis_results = process_resume(client, img_uri)
+            status.update(label="Analysis complete!", state="complete")
+
+        # Display Results
+        details = analysis_results.get("detail", "No details extracted.")
+        strengths = analysis_results.get(
+            "strengthen", "No recommendations found.")
+
+        with detail_placeholder.container():
+            st.markdown("### 📋 Extracted Details")
+            st.markdown(
+                f'<div class="card">{details}</div>', unsafe_allow_html=True)
+
+        with strength_placeholder.container():
+            st.markdown("### ✨ Key Strengths & Improvements")
+            st.markdown(
+                f'<div class="card">{strengths}</div>', unsafe_allow_html=True)
+
+        # Download Report
+        report_text = f"""# RESUME ANALYSIS REPORT
+======================
+Generated via JamAI Base
+
+## EXTRACTED DETAILS
+{details}
+
+## STRENGTHS & IMPROVEMENTS
+{strengths}
+"""
+        with download_placeholder:
+            st.download_button(
+                label="📥 Download Report (.txt)",
+                data=report_text,
+                file_name="resume_analysis_report.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
