@@ -1,10 +1,13 @@
+# น้องป.โท โคตรกาก
 from __future__ import annotations
 import os
 import tempfile
 from typing import Optional, Dict, Any
-
 import streamlit as st
 from jamaibase import JamAI, types as t
+x = 1
+y = 2
+
 
 # ==========================================
 # Configuration
